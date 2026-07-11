@@ -1,4 +1,4 @@
-# v0.1.0
+# v0.2.20
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
@@ -72,10 +72,19 @@ class HapilProtocol(gl.Contract):
         return text
 
     def _to_int(self, value: typing.Any, fallback: int) -> int:
+        text = str(value).strip()
         try:
-            return int(round(float(str(value).strip())))
+            return int(text)
         except Exception:
-            return fallback
+            pass
+        # Tolerate LLM-returned decimals like "80.0" without using float().
+        if "." in text:
+            whole = text.split(".", 1)[0]
+            try:
+                return int(whole)
+            except Exception:
+                return fallback
+        return fallback
 
     def _bounded_score(self, value: typing.Any, fallback: int) -> int:
         score = self._to_int(value, fallback)
@@ -344,7 +353,29 @@ class HapilProtocol(gl.Contract):
 
         evidence_items = json.loads(raw_items)
 
-        prompt = f"""You are a decentralized appeals court validator for the Hapil Protocol.
+        def evaluate_appeal() -> str:
+            # Fetch each evidence URL's actual live content so the validator
+            # judges the real source, not just the appellant's description of it.
+            fetched_evidence = []
+            for item in evidence_items:
+                url = item.get("url", "")
+                page_text = ""
+                if url:
+                    try:
+                        response = gl.nondet.web.get(url)
+                        page_text = self._limit(response.body.decode("utf-8", errors="ignore"), 4000)
+                    except Exception:
+                        page_text = "[FETCH_FAILED: could not retrieve this URL]"
+                fetched_evidence.append({
+                    "title": item.get("title", ""),
+                    "type": item.get("type", ""),
+                    "url": url,
+                    "source": item.get("source", ""),
+                    "appellant_relevance_claim": item.get("relevance", ""),
+                    "fetched_page_content": page_text,
+                })
+
+            prompt = f"""You are a decentralized appeals court validator for the Hapil Protocol.
 
 An appellant is challenging an existing, finalized verdict. Decide whether the
 newly submitted evidence justifies reopening the case.
@@ -353,13 +384,17 @@ ORIGINAL CASE ID: {rec.get("case_id", "")}
 ORIGINAL VERDICT: {rec.get("original_verdict", "")}
 APPEAL REASON: {rec.get("appeal_reason", "")}
 
-NEWLY SUBMITTED EVIDENCE:
-{json.dumps(evidence_items, indent=2)}
+NEWLY SUBMITTED EVIDENCE, including the LIVE FETCHED CONTENT of each URL
+(fetched_page_content). Base your judgment on fetched_page_content, not on
+the appellant's own relevance claim, which may be inaccurate or misleading:
+{json.dumps(fetched_evidence, indent=2)}
 
 Evaluate strictly:
 1. Is the evidence genuinely NEW (not a restatement of what the original case
    already considered)?
-2. Is the evidence credible given its source and type?
+2. Does fetched_page_content actually support the appellant's claim about it?
+   If a URL failed to fetch or its content does not support the claim,
+   treat that item as unverified and discount it.
 3. Does the evidence MATERIALLY change the conclusion of the original verdict?
 4. Does it contradict the original verdict's factual basis?
 
@@ -377,10 +412,9 @@ verdict_recommendation options: Uphold Original Verdict, Reopen Original Case, R
 All scores are integers 0-100.
 
 Rules:
-- Accepted requires genuinely new evidence AND at least Medium material impact.
-- Be conservative: frivolous, redundant, or unsupported appeals must be Rejected."""
+- Accepted requires genuinely new, VERIFIED evidence AND at least Medium material impact.
+- Be conservative: frivolous, redundant, unverified, or unsupported appeals must be Rejected."""
 
-        def evaluate_appeal() -> str:
             result = gl.nondet.exec_prompt(prompt, response_format="json")
             normalised = self._normalise_review(result)
             return self._json(normalised)
