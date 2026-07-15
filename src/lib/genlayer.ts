@@ -5,7 +5,7 @@ import { studionet } from "genlayer-js/chains";
 import type { Appeal, ConsensusResult, ContractConfig, EvidenceItem } from "./types";
 
 export const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ??
-  "0x0000000000000000000000000000000000000000") as `0x${string}`;
+  "0xBC418EB47917314aFc1c57cD61E19a2367FF174F") as `0x${string}`;
 
 export const STUDIO_EXPLORER = "https://studio.genlayer.com";
 
@@ -171,14 +171,13 @@ function assertExecutionSuccess(receipt: Record<string, unknown>): void {
 export function createAppeal(
   account: `0x${string}`,
   caseId: string,
-  originalVerdict: string,
   appealReason: string,
   stakeWei: bigint,
 ): Promise<WriteResult> {
   return write(
     account,
     "create_appeal",
-    [caseId, originalVerdict, appealReason, new Date().toISOString()],
+    [caseId, appealReason, new Date().toISOString()],
     stakeWei,
   );
 }

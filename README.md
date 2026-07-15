@@ -49,7 +49,7 @@ genlayer deploy --contract contracts/hapil_protocol.py --args 100000000000000000
 Copy-Item .env.local.example .env.local
 ```
 
-Set `NEXT_PUBLIC_CONTRACT_ADDRESS` to the deployed address.
+Set `NEXT_PUBLIC_CONTRACT_ADDRESS` to `0xBC418EB47917314aFc1c57cD61E19a2367FF174F`.
 
 ## 3. Run locally
 
@@ -73,10 +73,29 @@ Add `NEXT_PUBLIC_CONTRACT_ADDRESS` in Vercel → Project → Settings → Enviro
 
 | Step | Action | Contract method |
 |---|---|---|
-| 1 | Reference case + verdict, stake GEN | `create_appeal` (payable) |
-| 2 | Attach public evidence URLs + hashes | `submit_evidence` |
-| 3 | Trigger validator consensus | `request_review` |
+| 0 | Authorized registrar commits a finalized case record and original-evidence hashes | `register_case` |
+| 1 | Reference the authoritative case record and stake GEN | `create_appeal` (payable) |
+| 2 | Attach a public URL plus SHA-256 of its exact content | `submit_evidence` |
+| 3 | Appellant or authorized reviewer triggers validator consensus | `request_review` |
 | 4 | Consensus settles stake automatically | on-chain: return or slash |
+
+## Required authorization and verification setup
+
+The deployer is the initial `case_registrar`. Before an appeal can be filed, a registrar must call `register_case(case_id, final_verdict, hashes_json, finalized_at)`. The record is immutable and includes the SHA-256 hashes of evidence considered in the original case. The owner can grant an explicit `case_registrar` or `reviewer` role with `set_authorized_role(address, role, enabled)`.
+
+Only the appellant or an authorized reviewer can call `request_review`. Evidence must include a `0x`-prefixed SHA-256 of the exact bytes at its public URL. During review the contract fetches those bytes, recomputes the digest, excludes mismatches, and automatically rejects the appeal if none verify. Duplicate hashes and hashes already committed to the source case are rejected before review.
+
+## Accepted-stake repayment verification
+
+After deploying the updated contract to a network with GenLayer's EVM layer, retain transaction links showing this acceptance check:
+
+1. Record the appellant EOA balance and the contract balance.
+2. Register a case and file an appeal with a known stake.
+3. Submit an evidence URL whose fetched body SHA-256 equals the supplied hash, using material validators can clearly accept.
+4. Finalize `request_review` as the appellant or an authorized reviewer.
+5. Verify the appeal reports `Returned`, the appellant balance increased by exactly the stake, and the contract balance decreased by exactly the stake.
+
+The repayment uses the pinned GenLayer EOA external-message API (`@gl.evm.contract_interface` + `emit_transfer`), rather than an internal Intelligent-Contract message. Studio does not provide the full EVM/ghost-contract layer, so run the balance assertion on a network that supports it.
 
 Consensus output: appeal status, strength / novelty / confidence scores, material
 impact, stake outcome, verdict recommendation, reasoning, supporting evidence, and

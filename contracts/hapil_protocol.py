@@ -5,6 +5,17 @@ from genlayer import *
 
 import json
 import typing
+import hashlib
+
+
+@gl.evm.contract_interface
+class _EoaRecipient:
+    """Minimal external interface used for GEN repayments to wallet accounts."""
+    class View:
+        pass
+
+    class Write:
+        pass
 
 
 class HapilProtocol(gl.Contract):
@@ -33,6 +44,11 @@ class HapilProtocol(gl.Contract):
     stakes: TreeMap[str, str]
     # appeals_by_owner[wallet] -> "0|1|2" pipe-joined appeal ids
     appeals_by_owner: TreeMap[str, str]
+    # Immutable, registrar-authenticated source records keyed by case id.
+    cases: TreeMap[str, str]
+    # Address maps use "1" / "" because persistent booleans are not needed.
+    case_registrars: TreeMap[str, str]
+    authorized_reviewers: TreeMap[str, str]
 
     def __init__(self, min_stake: int = 1000000000000000000):
         self.owner = gl.message.sender_address.as_hex
@@ -45,6 +61,10 @@ class HapilProtocol(gl.Contract):
         self.consensus = TreeMap()
         self.stakes = TreeMap()
         self.appeals_by_owner = TreeMap()
+        self.cases = TreeMap()
+        self.case_registrars = TreeMap()
+        self.authorized_reviewers = TreeMap()
+        self.case_registrars[self.owner.lower()] = "1"
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -64,6 +84,24 @@ class HapilProtocol(gl.Contract):
     def _require_non_empty(self, value: str, field_name: str) -> None:
         if value is None or len(value.strip()) == 0:
             raise gl.vm.UserError(field_name + " is required")
+
+    def _is_authorized(self, addresses: TreeMap[str, str], account: str) -> bool:
+        return account.lower() == self.owner.lower() or addresses.get(account.lower(), "") == "1"
+
+    def _require_hex_hash(self, value: str, field_name: str) -> str:
+        value = str(value).strip().lower()
+        if len(value) != 66 or not value.startswith("0x"):
+            raise gl.vm.UserError(field_name + " must be a 0x-prefixed SHA-256 hash")
+        for char in value[2:]:
+            if char not in "0123456789abcdef":
+                raise gl.vm.UserError(field_name + " must be a 0x-prefixed SHA-256 hash")
+        return value
+
+    def _case(self, case_id: str) -> typing.Any:
+        raw = self.cases.get(case_id, "")
+        if raw == "":
+            raise gl.vm.UserError("Case is not registered by an authorized registrar")
+        return self._load(raw)
 
     def _limit(self, value: typing.Any, max_len: int) -> str:
         text = str(value)
@@ -243,7 +281,57 @@ class HapilProtocol(gl.Contract):
         raw = self.stakes.get(str(appeal_id), "")
         return raw if raw != "" else "0"
 
+    @gl.public.view
+    def get_case(self, case_id: str) -> str:
+        raw = self.cases.get(case_id, "")
+        return raw if raw != "" else "{}"
+
     # ------------------------------------------------------------------
+    # Case registry. A case is created once by an explicit authorized role,
+    # then treated as immutable evidence of the verdict being appealed.
+    # ------------------------------------------------------------------
+
+    @gl.public.write
+    def set_authorized_role(self, account: str, role: str, enabled: bool) -> None:
+        if self._sender() != self.owner.lower():
+            raise gl.vm.UserError("Only owner")
+        key = Address(account).as_hex.lower()
+        role_name = role.strip().lower()
+        target = self.case_registrars if role_name == "case_registrar" else self.authorized_reviewers if role_name == "reviewer" else None
+        if target is None:
+            raise gl.vm.UserError("role must be case_registrar or reviewer")
+        target[key] = "1" if enabled else ""
+
+    @gl.public.write
+    def register_case(self, case_id: str, final_verdict: str, original_evidence_hashes_json: str, finalized_at: str) -> str:
+        if not self._is_authorized(self.case_registrars, self._sender()):
+            raise gl.vm.UserError("Only an authorized case registrar")
+        self._require_non_empty(case_id, "case_id")
+        self._require_non_empty(final_verdict, "final_verdict")
+        case_id = self._limit(case_id.strip(), 200)
+        if self.cases.get(case_id, "") != "":
+            raise gl.vm.UserError("Case already registered; case records are immutable")
+        try:
+            supplied_hashes = json.loads(original_evidence_hashes_json)
+        except Exception:
+            raise gl.vm.UserError("original_evidence_hashes_json must be a JSON array")
+        if not isinstance(supplied_hashes, list):
+            raise gl.vm.UserError("original_evidence_hashes_json must be a JSON array")
+        hashes: typing.List[str] = []
+        for item in supplied_hashes:
+            digest = self._require_hex_hash(str(item), "original evidence hash")
+            if digest not in hashes:
+                hashes.append(digest)
+        record = {
+            "case_id": case_id,
+            "final_verdict": self._limit(final_verdict, 2000),
+            "original_evidence_hashes": hashes,
+            "finalized_at": self._limit(finalized_at, 80),
+            "registered_by": self._sender(),
+        }
+        self.cases[case_id] = self._json(record)
+        return self._json(record)
+
     # Step 1 + 2: Create appeal and lock GEN stake
     # ------------------------------------------------------------------
 
@@ -251,7 +339,6 @@ class HapilProtocol(gl.Contract):
     def create_appeal(
         self,
         case_id: str,
-        original_verdict: str,
         appeal_reason: str,
         created_at: str,
     ) -> str:
@@ -259,16 +346,18 @@ class HapilProtocol(gl.Contract):
         if stake < int(self.min_stake):
             raise gl.vm.UserError("Stake below minimum required GEN")
         self._require_non_empty(case_id, "case_id")
-        self._require_non_empty(original_verdict, "original_verdict")
         self._require_non_empty(appeal_reason, "appeal_reason")
+        case_id = self._limit(case_id.strip(), 200)
+        case = self._case(case_id)
 
         appeal_id = str(int(self.appeal_counter))
         sender = self._sender()
 
         record = {
             "id": int(appeal_id),
-            "case_id": self._limit(case_id, 200),
-            "original_verdict": self._limit(original_verdict, 2000),
+            "case_id": case_id,
+            "original_verdict": case.get("final_verdict", ""),
+            "case_record": case,
             "appeal_reason": self._limit(appeal_reason, 2000),
             "owner": sender,
             "stake": str(stake),
@@ -315,17 +404,24 @@ class HapilProtocol(gl.Contract):
         self._require_non_empty(title, "title")
         self._require_non_empty(url, "url")
         self._require_non_empty(relevance, "relevance")
+        evidence_hash = self._require_hex_hash(evidence_hash, "evidence_hash")
         if not url.startswith("http://") and not url.startswith("https://"):
             raise gl.vm.UserError("Evidence URL must be a public http(s) link")
 
         raw_items = self.evidence.get(key, "")
         items = json.loads(raw_items) if raw_items != "" else []
+        case = self._case(rec.get("case_id", ""))
+        if evidence_hash in case.get("original_evidence_hashes", []):
+            raise gl.vm.UserError("Evidence already exists in the authoritative case record")
+        for existing in items:
+            if existing.get("hash", "").lower() == evidence_hash:
+                raise gl.vm.UserError("Duplicate evidence content hash")
         items.append({
             "index": len(items),
             "title": self._limit(title, 300),
             "type": self._limit(evidence_type, 120),
             "url": self._limit(url, 800),
-            "hash": self._limit(evidence_hash, 130),
+            "hash": evidence_hash,
             "source": self._limit(source, 300),
             "relevance": self._limit(relevance, 1200),
             "submitter": self._sender(),
@@ -345,6 +441,8 @@ class HapilProtocol(gl.Contract):
     def request_review(self, appeal_id: int) -> str:
         key = str(appeal_id)
         rec = self._require_appeal_exists(key)
+        if rec.get("owner", "") != self._sender() and not self._is_authorized(self.authorized_reviewers, self._sender()):
+            raise gl.vm.UserError("Only the appellant or an authorized reviewer can finalize review")
         if rec.get("status", "") != "Draft":
             raise gl.vm.UserError("Appeal already reviewed")
         raw_items = self.evidence.get(key, "")
@@ -354,16 +452,22 @@ class HapilProtocol(gl.Contract):
         evidence_items = json.loads(raw_items)
 
         def evaluate_appeal() -> str:
-            # Fetch each evidence URL's actual live content so the validator
-            # judges the real source, not just the appellant's description of it.
+            # Hash the exact fetched bytes before presenting content to validators.
+            # A URL that changed after commitment, or an unreachable URL, cannot
+            # qualify as verified new evidence.
             fetched_evidence = []
             for item in evidence_items:
                 url = item.get("url", "")
                 page_text = ""
+                verified = False
+                actual_hash = ""
                 if url:
                     try:
                         response = gl.nondet.web.get(url)
-                        page_text = self._limit(response.body.decode("utf-8", errors="ignore"), 4000)
+                        body = response.body
+                        actual_hash = "0x" + hashlib.sha256(body).hexdigest()
+                        verified = actual_hash == item.get("hash", "").lower()
+                        page_text = self._limit(body.decode("utf-8", errors="ignore"), 4000)
                     except Exception:
                         page_text = "[FETCH_FAILED: could not retrieve this URL]"
                 fetched_evidence.append({
@@ -371,8 +475,21 @@ class HapilProtocol(gl.Contract):
                     "type": item.get("type", ""),
                     "url": url,
                     "source": item.get("source", ""),
+                    "committed_content_hash": item.get("hash", ""),
+                    "fetched_content_hash": actual_hash,
+                    "content_hash_verified": verified,
                     "appellant_relevance_claim": item.get("relevance", ""),
                     "fetched_page_content": page_text,
+                })
+
+            verified_evidence = [item for item in fetched_evidence if item["content_hash_verified"]]
+            if len(verified_evidence) == 0:
+                return self._json({
+                    "appeal_status": "Rejected", "appeal_strength_score": 0,
+                    "evidence_novelty_score": 0, "material_impact": "None",
+                    "confidence_score": 100, "verdict_recommendation": "Uphold Original Verdict",
+                    "reasoning": "No submitted evidence matched its committed content hash.",
+                    "supporting_evidence": [], "next_action": "Stake is slashed; submit a new appeal with verifiable evidence."
                 })
 
             prompt = f"""You are a decentralized appeals court validator for the Hapil Protocol.
@@ -382,12 +499,14 @@ newly submitted evidence justifies reopening the case.
 
 ORIGINAL CASE ID: {rec.get("case_id", "")}
 ORIGINAL VERDICT: {rec.get("original_verdict", "")}
+AUTHORITATIVE CASE RECORD (including evidence already considered):
+{json.dumps(rec.get("case_record", {}), indent=2)}
 APPEAL REASON: {rec.get("appeal_reason", "")}
 
 NEWLY SUBMITTED EVIDENCE, including the LIVE FETCHED CONTENT of each URL
 (fetched_page_content). Base your judgment on fetched_page_content, not on
 the appellant's own relevance claim, which may be inaccurate or misleading:
-{json.dumps(fetched_evidence, indent=2)}
+{json.dumps(verified_evidence, indent=2)}
 
 Evaluate strictly:
 1. Is the evidence genuinely NEW (not a restatement of what the original case
@@ -412,6 +531,7 @@ verdict_recommendation options: Uphold Original Verdict, Reopen Original Case, R
 All scores are integers 0-100.
 
 Rules:
+- Every item shown has a content hash verified against its on-chain commitment.
 - Accepted requires genuinely new, VERIFIED evidence AND at least Medium material impact.
 - Be conservative: frivolous, redundant, unverified, or unsupported appeals must be Rejected."""
 
@@ -438,7 +558,9 @@ Rules:
             rec["stake_outcome"] = "Returned"
             if stake_amount > 0:
                 # Return the locked GEN stake to the appellant.
-                gl.get_contract_at(Address(rec["owner"])).emit_transfer(value=u256(stake_amount))
+                # EOA recipients are external chain-layer messages. This is the
+                # pinned py-genlayer SDK transfer API, finalized with the appeal.
+                _EoaRecipient(Address(rec["owner"])).emit_transfer(value=u256(stake_amount))
         else:
             rec["status"] = "Rejected"
             rec["stake_outcome"] = "Slashed"

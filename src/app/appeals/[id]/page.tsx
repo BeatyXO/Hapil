@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useWallet } from "@/lib/wallet";
 import {
   explorerAddressUrl, fetchAppeal, fetchConsensus, fetchEvidence,
-  requestReview, sha256Hex, submitEvidence,
+  requestReview, submitEvidence,
 } from "@/lib/genlayer";
 import {
   EVIDENCE_TYPES, formatGen, shortAddress,
@@ -50,6 +50,7 @@ export default function AppealDetail() {
   const [evUrl, setEvUrl] = useState("");
   const [evSource, setEvSource] = useState("");
   const [evRelevance, setEvRelevance] = useState("");
+  const [evContentHash, setEvContentHash] = useState("");
   const [evPhase, setEvPhase] = useState<TxPhase>("idle");
   const [evHash, setEvHash] = useState<string | null>(null);
   const [evError, setEvError] = useState<string | null>(null);
@@ -67,11 +68,10 @@ export default function AppealDetail() {
     setEvError(null);
     setEvPhase("signing");
     try {
-      const contentHash = await sha256Hex(`${evTitle}|${evUrl}|${evSource}`);
-      const res = await submitEvidence(address, id, evTitle.trim(), evType, evUrl.trim(), contentHash, evSource.trim(), evRelevance.trim());
+      const res = await submitEvidence(address, id, evTitle.trim(), evType, evUrl.trim(), evContentHash.trim(), evSource.trim(), evRelevance.trim());
       setEvHash(res.hash);
       setEvPhase("success");
-      setEvTitle(""); setEvUrl(""); setEvSource(""); setEvRelevance("");
+      setEvTitle(""); setEvUrl(""); setEvSource(""); setEvRelevance(""); setEvContentHash("");
       await reload();
     } catch (err) {
       setEvPhase("error");
@@ -225,6 +225,12 @@ export default function AppealDetail() {
               <div>
                 <Label>Public URL</Label>
                 <Input required type="url" value={evUrl} onChange={(e) => setEvUrl(e.target.value)} placeholder="https://…" />
+              </div>
+              <div>
+                <Label>SHA-256 of exact URL content</Label>
+                <Input required value={evContentHash} onChange={(e) => setEvContentHash(e.target.value)}
+                  pattern="0x[a-fA-F0-9]{64}" placeholder="0x… (64 hexadecimal characters)" />
+                <p className="mt-1 text-xs text-court-700">The contract fetches this URL during review and rejects a content-hash mismatch.</p>
               </div>
               <div>
                 <Label>Source</Label>

@@ -13,7 +13,6 @@ export default function NewAppeal() {
   const router = useRouter();
 
   const [caseId, setCaseId] = useState("");
-  const [verdict, setVerdict] = useState("");
   const [reason, setReason] = useState("");
   const [stakeGen, setStakeGen] = useState("1");
   const [minStake, setMinStake] = useState<bigint>(10n ** 18n);
@@ -43,7 +42,7 @@ export default function NewAppeal() {
 
     setPhase("signing");
     try {
-      const res = await createAppeal(address, caseId.trim(), verdict.trim(), reason.trim(), stakeWei);
+      const res = await createAppeal(address, caseId.trim(), reason.trim(), stakeWei);
       setHash(res.hash);
       setPhase("success");
       setTimeout(() => router.push("/dashboard"), 1500);
@@ -67,14 +66,9 @@ export default function NewAppeal() {
         <CardContent>
           <form onSubmit={onSubmit} className="flex flex-col gap-4">
             <div>
-              <Label htmlFor="case">Existing Case ID</Label>
+              <Label htmlFor="case">Authorized Case ID</Label>
               <Input id="case" required value={caseId} onChange={(e) => setCaseId(e.target.value)}
                 placeholder="e.g. DAO-DISPUTE-2026-014" />
-            </div>
-            <div>
-              <Label htmlFor="verdict">Existing Verdict</Label>
-              <Textarea id="verdict" required rows={3} value={verdict} onChange={(e) => setVerdict(e.target.value)}
-                placeholder="Summarize the finalized verdict being challenged" />
             </div>
             <div>
               <Label htmlFor="reason">Appeal Reason</Label>
