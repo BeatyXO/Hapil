@@ -208,6 +208,28 @@ export function requestReview(account: `0x${string}`, appealId: number): Promise
   return write(account, "request_review", [appealId]);
 }
 
+export function setMinStake(account: `0x${string}`, minStakeWei: bigint): Promise<WriteResult> {
+  return write(account, "set_min_stake", [minStakeWei]);
+}
+
+export function setAuthorizedRole(
+  account: `0x${string}`,
+  target: string,
+  role: "case_registrar" | "reviewer",
+  enabled: boolean,
+): Promise<WriteResult> {
+  return write(account, "set_authorized_role", [target, role, enabled]);
+}
+
+export function registerCase(
+  account: `0x${string}`,
+  caseId: string,
+  finalVerdict: string,
+  originalEvidenceHashesJson: string,
+): Promise<WriteResult> {
+  return write(account, "register_case", [caseId, finalVerdict, originalEvidenceHashesJson, new Date().toISOString()]);
+}
+
 // ---------------- utils ----------------
 
 export async function sha256Hex(text: string): Promise<string> {
